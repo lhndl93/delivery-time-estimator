@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label"
 import { PlacesInput } from "@/components/ui/places-input"
 import { LocationResult } from "@/lib/nominatim"
 import { RouteMap } from "./route-map"
-import { AlertTriangle, AlertCircle, Construction } from "lucide-react"
+import { AlertTriangle, AlertCircle, Construction, Car, Bike, Truck, PersonStanding } from "lucide-react"
 
 interface TrafficEvent {
   id: string
@@ -18,12 +18,21 @@ interface TrafficEvent {
   }
 }
 
+type VehicleType = 'car' | 'bike' | 'foot' | 'truck'
+
+// Average speeds in mph for different modes
+const AVERAGE_SPEEDS = {
+  walking: 3.1, // Average walking speed
+  cycling: 12,  // Average cycling speed
+} as const
+
 export function DeliveryCalculator() {
   const [origin, setOrigin] = React.useState<LocationResult | null>(null)
   const [destination, setDestination] = React.useState<LocationResult | null>(null)
   const [estimatedTime, setEstimatedTime] = React.useState<string | null>(null)
   const [showMap, setShowMap] = React.useState(false)
   const [trafficEvents, setTrafficEvents] = React.useState<TrafficEvent[]>([])
+  const [vehicle, setVehicle] = React.useState<VehicleType>('car')
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -49,9 +58,10 @@ export function DeliveryCalculator() {
       const trafficData = await trafficResponse.json()
       setTrafficEvents(trafficData.trafficEvents)
 
-      // Fetch route data
+      // Fetch route data with correct vehicle profile
+      const profile = vehicle === 'truck' ? 'driving-hgv' : vehicle
       const response = await fetch(
-        `https://router.project-osrm.org/route/v1/driving/${origin.lon},${origin.lat};${destination.lon},${destination.lat}?overview=full`
+        `https://router.project-osrm.org/route/v1/${profile}/${origin.lon},${origin.lat};${destination.lon},${destination.lat}?overview=full`
       )
       
       if (!response.ok) throw new Error("Failed to fetch route")
@@ -62,25 +72,61 @@ export function DeliveryCalculator() {
       
       // Convert distance from meters to miles
       const distanceMiles = parseFloat((data.routes[0].distance * 0.000621371).toFixed(1))
-      
-      // Get driving time in hours from OSRM and apply traffic multiplier
-      const baseTimeHours = data.routes[0].duration / 3600
-      const adjustedTimeHours = baseTimeHours * trafficData.prediction.timeMultiplier
+
+      // Calculate time based on mode of transport
+      let adjustedTimeHours: number
+
+      if (vehicle === 'foot') {
+        // Calculate walking time based on actual distance and average walking speed
+        adjustedTimeHours = distanceMiles / AVERAGE_SPEEDS.walking
+        if (adjustedTimeHours > 8) {
+          throw new Error("Distance too far for walking")
+        }
+      } else if (vehicle === 'bike') {
+        // Calculate cycling time based on actual distance and average cycling speed
+        adjustedTimeHours = distanceMiles / AVERAGE_SPEEDS.cycling
+        if (adjustedTimeHours > 8) {
+          throw new Error("Distance too far for cycling")
+        }
+      } else {
+        // For vehicles, use OSRM time with traffic adjustments
+        const baseTimeHours = data.routes[0].duration / 3600
+        adjustedTimeHours = baseTimeHours * (trafficData.prediction.timeMultiplier || 1)
+      }
       
       const hours = Math.floor(adjustedTimeHours)
       const minutes = Math.round((adjustedTimeHours - hours) * 60)
+
+      // Create mode-specific description
+      const modeDescription = {
+        car: 'driving',
+        bike: 'cycling',
+        foot: 'walking',
+        truck: 'HGV driving'
+      }[vehicle]
+
+      // Add warning for long journeys
+      const timeWarning = (vehicle === 'foot' || vehicle === 'bike') && adjustedTimeHours > 4
+        ? ' (Long journey - consider breaks)'
+        : ''
       
       setEstimatedTime(
-        `Estimated journey time: ${hours ? `${hours}h ` : ""}${minutes}min (${distanceMiles} miles)${
-          trafficData.prediction.timeMultiplier > 1 
+        `Estimated ${modeDescription} time: ${hours ? `${hours}h ` : ""}${minutes}min (${distanceMiles} miles)${
+          ['car', 'truck'].includes(vehicle) && trafficData.prediction.timeMultiplier > 1 
             ? ` - Including ${trafficData.prediction.description.toLowerCase()}`
             : ""
-        }`
+        }${timeWarning}`
       )
 
-    } catch (error) {
+    } catch (error: unknown) {
       console.error("Error calculating route:", error)
-      setEstimatedTime("Error calculating time")
+      if (error instanceof Error && 
+          (error.message === "Distance too far for walking" || 
+           error.message === "Distance too far for cycling")) {
+        setEstimatedTime(`Distance too far for ${vehicle === 'foot' ? 'walking' : 'cycling'}. Please choose another mode of transport.`)
+      } else {
+        setEstimatedTime("Error calculating time")
+      }
     }
   }
 
@@ -137,6 +183,50 @@ export function DeliveryCalculator() {
               />
             </div>
           </div>
+
+          {/* Vehicle Selection */}
+          <div className="space-y-2">
+            <Label>Transport Mode</Label>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant={vehicle === 'car' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setVehicle('car')}
+              >
+                <Car className="h-4 w-4 mr-1" />
+                Car
+              </Button>
+              <Button
+                type="button"
+                variant={vehicle === 'bike' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setVehicle('bike')}
+              >
+                <Bike className="h-4 w-4 mr-1" />
+                Bike
+              </Button>
+              <Button
+                type="button"
+                variant={vehicle === 'truck' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setVehicle('truck')}
+              >
+                <Truck className="h-4 w-4 mr-1" />
+                Truck
+              </Button>
+              <Button
+                type="button"
+                variant={vehicle === 'foot' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setVehicle('foot')}
+              >
+                <PersonStanding className="h-4 w-4 mr-1" />
+                Walking
+              </Button>
+            </div>
+          </div>
+
           <Button 
             type="submit" 
             className="w-full"
@@ -169,7 +259,11 @@ export function DeliveryCalculator() {
               )}
             </div>
             {showMap && origin && destination && (
-              <RouteMap origin={origin} destination={destination} />
+              <RouteMap 
+                origin={origin} 
+                destination={destination} 
+                vehicle={vehicle}
+              />
             )}
           </div>
         )}
